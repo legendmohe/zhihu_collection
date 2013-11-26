@@ -1,19 +1,23 @@
 # encoding: UTF-8
+require 'fileutils'
 require "net/http"
 require "uri"
 require "json"
 require 'nokogiri'
 
+Dir.chdir(File.dirname(__FILE__))
+
 def fetchContent(collectionID, xsrf="", start="")
     uri = URI('http://www.zhihu.com/collection/' + collectionID)
 
-    doc = Nokogiri::HTML(Net::HTTP.get(uri))
     json = JSON.parse(Net::HTTP.post_form(uri, {'_xsrf' => xsrf, 'start' => start}).body)
 
     res = Hash.new
     res["number"] = json["msg"][0]
     res["content"] = json["msg"][1]
     res["start"] = json["msg"][2]
+	
+	#doImageCache(collectionID, Nokogiri::HTML(res["content"]))
 
     return res
 end
@@ -24,6 +28,7 @@ def parseItems(src)
     doc.css(".zm-item").each do |zitem|
         item = Hash.new
         item["title"] = zitem.css(".zm-item-title").text.strip
+		
         answers = Hash.new
         zitem.css(".zm-item-fav").each do |fitem|
             answers[fitem.css(".zm-item-answer-author-wrap").text.strip] = fitem.css(".content.hidden").text
@@ -31,7 +36,31 @@ def parseItems(src)
         item["answers"] = answers
         items.push(item)
     end
+	
     return items
+end
+
+def doImageCache(title, doc)
+	path = "./res/#{title}_file/"
+	FileUtils.mkpath(path) unless File.exists?(path)
+	
+	doc.css("img").each do |img| 
+		src = img["src"]
+		uri = URI.parse(src)
+		filename = File.basename(uri.path)
+		
+		Net::HTTP.start(uri.host) { |http|
+			resp = http.get(uri.path)
+			open(path + filename, "wb") { |file|
+				file.write(resp.body)
+				puts "save: #{path + filename}"
+			}
+		}
+		
+		img["src"] = "./#{title}_file/" + filename
+	end
+	
+	return doc
 end
 
 def init(collectionID)
@@ -50,19 +79,20 @@ def toMultiFile(src, items)
 
     template = File.open("template.html", "r:UTF-8").read() # for Windows
     items.each{ |item| 
-        buffer = "<div class = \"item\" id=\"wrapper\" class=\"typo typo-selection\">\n"
-        buffer += "<div class = \"title\">#{item["title"]}</div>\n"
-        buffer += "<div class = \"answers\">" 
+		buffer = ["<div><h1 class = \"title\">#{item["title"]}</h1></div>"]
+        buffer.push("<div class = \"item\" id=\"wrapper\" class=\"typo typo-selection\">")
+        buffer.push("<div class = \"answers\">" )
         item["answers"].each { |author, content|
-            buffer += "<div class = \"author\">#{author}</div>\n"
-            buffer += "<div class = \"content\">#{content}</div>\n"
-            buffer += "<hr />"
+			content = doImageCache("ImageCache", Nokogiri::HTML(content)).to_html # image cache
+            buffer.push("<div class = \"author\">#{author}</div>")
+            buffer.push("<div class = \"content\">#{content}</div>")
         }
-        buffer += "</div>\n"
-        buffer += "</div>\n"
+        buffer.push("</div>")
+        buffer.push("</div>")
 
-        File.open("#{item["title"].gsub(/[\x00\/\\:\*\?\"<>\|]/, "_")}[#{src["collectionName"].gsub(/[\x00\/\\:\*\?\"<>\|]/, "_")}].html", 'w') { |file| 
-            file.write(template.sub("<!-- this is template-->", buffer)) 
+		#[#{src["collectionName"].gsub(/[\x00\/\\:\*\?\"<>\|]/, "_")}]
+        File.open("res/#{item["title"].gsub(/[\x00\/\\:\*\?\"<>\|]/, "_")}.html", 'w') { |file| 
+            file.write(template.sub("<!-- this is template-->", buffer.join("\n")).sub!("<!-- this is title-->", item["title"])) 
         }
     }
 
