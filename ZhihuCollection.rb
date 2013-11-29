@@ -9,15 +9,18 @@ Dir.chdir(File.dirname(__FILE__))
 
 def fetchContent(collectionID, xsrf="", start="")
     uri = URI('http://www.zhihu.com/collection/' + collectionID)
+	response = Net::HTTP.post_form(uri, {'_xsrf' => xsrf, 'start' => start})
+	begin
+		json = JSON.parse(response.body)
 
-    json = JSON.parse(Net::HTTP.post_form(uri, {'_xsrf' => xsrf, 'start' => start}).body)
-
-    res = Hash.new
-    res["number"] = json["msg"][0]
-    res["content"] = json["msg"][1]
-    res["start"] = json["msg"][2]
-	
-	#doImageCache(collectionID, Nokogiri::HTML(res["content"]))
+		res = Hash.new
+		res["number"] = json["msg"][0]
+		res["content"] = json["msg"][1]
+		res["start"] = json["msg"][2]
+	rescue
+		puts "parse error"
+		File.open("error.log", 'w') { |file| file.write(uri.to_s + "\n" + xsrf.to_s + "\n" + start.to_s + "\n" + response.body) }
+	end
 
     return res
 end
@@ -25,13 +28,14 @@ end
 def parseItems(src)
     items = []
     doc = Nokogiri::HTML(src)
+	#File.open("article.log", 'w') { |file| file.write(src)}
     doc.css(".zm-item").each do |zitem|
         item = Hash.new
         item["title"] = zitem.css(".zm-item-title").text.strip
 		
-        answers = Hash.new
+        answers = []
         zitem.css(".zm-item-fav").each do |fitem|
-            answers[fitem.css(".zm-item-answer-author-wrap").text.strip] = fitem.css(".content.hidden").text
+			answers << fitem
         end
         item["answers"] = answers
         items.push(item)
@@ -44,22 +48,38 @@ def doImageCache(title, doc)
 	path = "./res/#{title}_file/"
 	FileUtils.mkpath(path) unless File.exists?(path)
 	
+	imgUrls = []
+	
 	doc.css("img").each do |img| 
-		src = img["src"]
+		src = URI.escape(img["src"])
 		uri = URI.parse(src)
 		filename = File.basename(uri.path)
 		
-		Net::HTTP.start(uri.host) { |http|
-			resp = http.get(uri.path)
-			open(path + filename, "wb") { |file|
-				file.write(resp.body)
-				puts "save: #{path + filename}"
+		imgUrls << uri
+		img["src"] = "./#{title}_file/" + filename
+	end
+#=begin
+	imgUrls.each_slice(6).to_a.each{ |group|
+		threads = []
+	
+		group.each {|uri|
+			threads << Thread.new { 
+				begin
+				Net::HTTP.start(uri.hostname) { |http|
+					resp = http.get(uri.path)
+					File.open(path + File.basename(uri.path), "wb") { |file|
+						file.write(resp.body)
+						puts "save: #{uri}"
+					}
+				}
+				rescue
+				end
 			}
 		}
 		
-		img["src"] = "./#{title}_file/" + filename
-	end
-	
+		threads.each { |t| t.join }
+	}
+#=end
 	return doc
 end
 
@@ -71,21 +91,30 @@ def init(collectionID)
 
     src = Hash.new
     src["collectionName"] = doc.css("#zh-fav-head-title").text
+	src["xsrf"] = xsrf
     
     return src
 end
 
 def toMultiFile(src, items)
 
+	puts "downloading images."
+
     template = File.open("template.html", "r:UTF-8").read() # for Windows
     items.each{ |item| 
 		buffer = ["<div><h1 class = \"title\">#{item["title"]}</h1></div>"]
         buffer.push("<div class = \"item\" id=\"wrapper\" class=\"typo typo-selection\">")
         buffer.push("<div class = \"answers\">" )
-        item["answers"].each { |author, content|
-			content = doImageCache("ImageCache", Nokogiri::HTML(content)).to_html # image cache
+        item["answers"].each { |fitem|
+		
+			author = fitem.css(".zm-item-answer-author-wrap").text.strip
+            content = fitem.css(".content.hidden").text
+			link = "http://www.zhihu.com" + fitem.css(".answer-date-link.meta-item").attr("href")
+		
+			content = doImageCache("ImageCache", Nokogiri::HTML(content).css("body").children).to_html # image cache
             buffer.push("<div class = \"author\">#{author}</div>")
             buffer.push("<div class = \"content\">#{content}</div>")
+			buffer.push("<div class=\"link\"><a href=\"#{link}\">[原文链接]</a></div>")
         }
         buffer.push("</div>")
         buffer.push("</div>")
@@ -98,42 +127,18 @@ def toMultiFile(src, items)
 
 end
 
-def toSingleFile(src, items)
-
-    template = File.open("template.html", "r:UTF-8").read() # for Windows
-    buffer = "<div class = \"items\" id=\"wrapper\" class=\"typo typo-selection\">\n"
-    items.each{ |item| 
-        puts  item["title"]
-        buffer += "<div class = \"item\">\n"
-        buffer += "<div class = \"title\">#{item["title"]}</div>\n"
-        buffer += "<div class = \"answers\">" 
-        item["answers"].each { |author, content|
-            buffer += "<div class = \"author\">#{author}</div>\n"
-            buffer += "<div class = \"content\">#{content}</div>\n"
-            buffer += "<hr />"
-        }
-        buffer += "</div>\n</div>\n" 
-    }
-    buffer += "</div>\n"
-    filename = "[#{src["collectionName"].gsub(/[\x00\/\\:\*\?\"<>\|]/, "_")}].html"
-    File.open(filename, 'w') { |file| 
-            file.write(template.sub("<!-- this is template-->", buffer)) 
-        }
-
-end
-
-collectionID = "19686579"
-
+collectionID = "19563328"
 src = init(collectionID)
-puts "collectionName : #{src["collectionName"]}\n"
+puts "collectionName : #{src["collectionName"]}\nxsrf: #{src["xsrf"]}\n"
 
 items = []
 loop do
     contents = fetchContent(collectionID, src["xsrf"], src["start"])
+	#next unless contents # json parse error
     items += (parseItems(contents["content"]))
     
     puts "collection's count : #{items.size} \n"
-    break if contents["number"] < 20
+    break if contents["start"] == -1
     src["start"] = contents["start"]
 end
 
