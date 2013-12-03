@@ -3,9 +3,14 @@ require 'fileutils'
 require "net/http"
 require "uri"
 require "json"
+require 'digest'
 require 'nokogiri'
 
 Dir.chdir(File.dirname(__FILE__))
+
+def hash_url(url)
+	return Digest::MD5.hexdigest("#{url}")
+end
 
 def fetchContent(collectionID, xsrf="", start="")
     uri = URI('http://www.zhihu.com/collection/' + collectionID)
@@ -48,38 +53,40 @@ def doImageCache(title, doc)
 	path = "./res/#{title}_file/"
 	FileUtils.mkpath(path) unless File.exists?(path)
 	
-	imgUrls = []
+	imgEntities = []
 	
 	doc.css("img").each do |img| 
-		src = URI.escape(img["src"])
-		uri = URI.parse(src)
-		filename = File.basename(uri.path)
-		
-		imgUrls << uri
+		uri = URI.parse(img["src"])
+		filename = hash_url("#{uri.to_s}") # hash url for save files
 		img["src"] = "./#{title}_file/" + filename
+		
+		imgEntities << {'uri'=>uri, 'hash'=>filename}
 	end
-#=begin
-	imgUrls.each_slice(6).to_a.each{ |group|
+
+	imgEntities.each_slice(6).to_a.each{ |group|
 		threads = []
 	
-		group.each {|uri|
+		group.each {|entity|
 			threads << Thread.new { 
 				begin
-				Net::HTTP.start(uri.hostname) { |http|
-					resp = http.get(uri.path)
-					File.open(path + File.basename(uri.path), "wb") { |file|
-						file.write(resp.body)
-						puts "save: #{uri}"
+					uri = entity['uri']
+					filename = entity['hash']
+					Net::HTTP.start(uri.hostname) { |http|
+						resp = http.get(uri.to_s)
+						File.open(path + filename, "wb") { |file|
+							file.write(resp.body)
+							print "."
+						}
 					}
-				}
 				rescue
+					puts "error: \n    #{uri}"
 				end
 			}
 		}
 		
 		threads.each { |t| t.join }
 	}
-#=end
+
 	return doc
 end
 
